@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * Minimal read-only SQLite reader for one in-memory snapshot of a database file.
  *
@@ -12,6 +12,8 @@
  * 绝不让扩展宿主崩溃。只读主 .db 文件（WAL 模式下主文件是上次
  * checkpoint 的一致性快照，可能略旧但不撕裂）。
  */
+
+const fs = require('node:fs');
 
 const HEADER_MAGIC = 'SQLite format 3\0';
 
@@ -309,4 +311,39 @@ function open(buffer) {
   return { pageSize, pageCount, usable, page, schema, walkTable, walkIndex, seekRowid };
 }
 
-module.exports = { open, readVarint };
+function walStat(file) {
+  try { return fs.statSync(file + '-wal'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return null; }
+}
+
+function snapshotKey(file) {
+  const main = fs.statSync(file), wal = walStat(file);
+  return [main.size, main.mtimeMs, wal?.size, wal?.mtimeMs].join(':');
+}
+
+function withSnapshot(file, consume) {
+  if ((walStat(file)?.size || 0) <= 32) return consume(open(fs.readFileSync(file)));
+  // A read transaction includes committed WAL frames and excludes in-flight writes.
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(file, { readOnly: true, timeout: 0 });
+  try {
+    db.exec('PRAGMA trusted_schema=OFF; BEGIN');
+    const schema = new Map(db.prepare("SELECT name, rootpage FROM sqlite_schema WHERE type='table' AND rootpage > 0")
+      .all().map(({ name, rootpage }) => [name, { type: 'table', rootpage }]));
+    const names = new Map([...schema].map(([name, entry]) => [entry.rootpage, name]));
+    return consume({ schema: () => schema, walkTable(rootpage, visit) {
+      const name = names.get(rootpage);
+      if (!name) throw new Error('SQLite snapshot table not found');
+      const query = db.prepare('SELECT rowid, * FROM "' + name.replace(/"/g, '""') + '" ORDER BY rowid');
+      query.setReturnArrays(true);
+      for (const [rowid, ...values] of query.iterate()) {
+        if (visit(rowid, values.map((v) => v instanceof Uint8Array
+          ? Buffer.from(v.buffer, v.byteOffset, v.byteLength) : v))) break;
+      }
+    } });
+  } finally {
+    db.close();
+  }
+}
+
+module.exports = { open, readVarint, snapshotKey, withSnapshot };

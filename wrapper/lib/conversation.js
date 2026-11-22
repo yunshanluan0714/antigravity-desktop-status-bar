@@ -5,7 +5,6 @@
  * 所有「字段号」均为对 Antigravity 2.33.0 真实文件的实测结论（见 README），
  * 解析失败一律抛错，由 store 层捕获降级。
  */
-const fs = require('fs');
 const path = require('path');
 const sqlite = require('./sqlite');
 const proto = require('./proto');
@@ -52,7 +51,10 @@ function num(value) {
  * 字段可能缺失（如 gen_metadata 表为空），缺失即 null/0，调用方按无数据处理。
  */
 function parseConversationDb(buffer) {
-  const db = sqlite.open(buffer);
+  return parseConversation(sqlite.open(buffer));
+}
+
+function parseConversation(db) {
   const objects = db.schema();
   const table = (name) => {
     const entry = objects.get(name);
@@ -200,6 +202,7 @@ function parseConversationDb(buffer) {
       const elapsed = settled - (hasFirst ? first : started);
       timing.decodeMs += elapsed;
       timing.outputTokens += usage.output;
+      result.latestRequestSpeed = usage.output * 1000 / elapsed;
       round.decodeMs += elapsed;
       round.outputTokens += usage.output;
     }
@@ -228,8 +231,7 @@ function parseConversationDb(buffer) {
 
 /** 读取并解析一个会话 db 文件；任何失败抛错。 */
 function parseFile(filePath) {
-  const buffer = fs.readFileSync(filePath);
-  return parseConversationDb(buffer);
+  return sqlite.withSnapshot(filePath, parseConversation);
 }
 
 module.exports = { parseConversationDb, parseFile, STEP_USER, STEP_ASSISTANT };

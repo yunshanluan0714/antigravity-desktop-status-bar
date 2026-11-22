@@ -2,19 +2,20 @@
 /**
  * 数据源聚合：读取并汇总指定会话（或启发式活跃会话）的统计段。
  *
- * snapshotForId(convId)：按会话 id 出快照（界面绑定用，SPEC-2 修正 B）。
+ * snapshotForId(convId)：按会话 id 出快照（界面绑定用 修正 B）。
  * snapshot()：启发式挑活跃会话（保留作兜底，判定按优先级）：
  *  1. summaries 中 status=CASCADE_RUN_STATUS_RUNNING / not_fully_idle 的会话
  *  2. summaries 里最近被用户输入的会话（last_user_input_time）
  *  3. 全局 last_modified_time 最新的会话
  *
  * 缓存：summaries 与会话 db 的解析结果都按「文件 mtime+size」缓存，
- * 保证 2s 轮询开销不随会话数膨胀（SPEC-2）。
+ * 保证 2s 轮询开销不随会话数膨胀。
  */
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { snapshotKey } = require('./sqlite');
 const summaries = require('./summaries');
 const conversation = require('./conversation');
 
@@ -92,8 +93,7 @@ function parseSummariesCached(base) {
   const file = path.join(base, 'conversation_summaries.db');
   let key = null;
   try {
-    const st = fs.statSync(file);
-    key = st.mtimeMs + ':' + st.size;
+    key = snapshotKey(file);
   } catch (_) {
     return [];
   }
@@ -108,8 +108,7 @@ const convCache = new Map();
 const CONV_CACHE_MAX = 64;
 
 function parseConversationCached(dbPath, convId) {
-  const st = fs.statSync(dbPath);
-  const key = st.mtimeMs + ':' + st.size;
+  const key = snapshotKey(dbPath);
   const hit = convCache.get(convId);
   if (hit && hit.key === key) return hit.conv;
   const conv = conversation.parseFile(dbPath);
@@ -159,6 +158,7 @@ function applyConversation(result, conv) {
       toolMs,
     };
   }
+  result.latestRequestSpeed = conv.latestRequestSpeed ?? null;
   if (conv.latestStep && conv.latestStep.decodeMs > 0 && conv.latestStep.outputTokens > 0) {
     result.latestSpeed = conv.latestStep.outputTokens / (conv.latestStep.decodeMs / 1000);
   }
@@ -205,7 +205,7 @@ function emptySnapshot() {
     tokens: null,
     context: null,
     subagents: null,
-    latestSpeed: null,
+    latestSpeed: null, latestRequestSpeed: null,
   };
 }
 
@@ -240,7 +240,7 @@ function snapshotForId(convId) {
 }
 
 /**
- * 按标题在 summaries 里匹配会话（界面只拿到标题时的绑定路径，SPEC-2）。
+ * 按标题在 summaries 里匹配会话（界面只拿到标题时的绑定路径）。
  * 归一化：trim + 小写；全等优先，其次前缀，再次包含；
  * 同分（重名会话实测存在）取 lastModifiedTime 最新的。
  * 返回 { conversationId, title } 或 null。

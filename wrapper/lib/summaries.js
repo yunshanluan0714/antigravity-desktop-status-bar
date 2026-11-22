@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * 会话目录解析：conversation_summaries.db 快照 → 会话列表。
  *
@@ -10,8 +10,6 @@
  *   16 last_user_input_time, 17 last_user_input_step_index, 18 app_data_dir,
  *   19 raw_summary, 20 group_id
  */
-const fs = require('fs');
-const path = require('path');
 const sqlite = require('./sqlite');
 
 /**
@@ -20,7 +18,10 @@ const sqlite = require('./sqlite');
  * title, preview, step_count, ...）。
  */
 function parseSummariesDb(buffer) {
-  const db = sqlite.open(buffer);
+  return parseSummaries(sqlite.open(buffer));
+}
+
+function parseSummaries(db) {
   const objects = db.schema();
   const tableEntry = objects.get('conversation_summaries');
   if (!tableEntry || tableEntry.type !== 'table') throw new Error('缺少表 conversation_summaries');
@@ -47,7 +48,7 @@ function parseSummariesDb(buffer) {
 }
 
 function parseFile(filePath) {
-  return parseSummariesDb(fs.readFileSync(filePath));
+  return sqlite.withSnapshot(filePath, parseSummaries);
 }
 
 module.exports = { parseSummariesDb, parseFile };

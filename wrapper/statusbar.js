@@ -11,6 +11,7 @@ const path = require('path');
 const fs = require('fs');
 const electron = require('electron');
 const store = require('./lib/store');
+const statistics = require('./snapshot-worker');
 const renderer = require('./renderer');
 
 const app = electron.app;
@@ -162,10 +163,10 @@ async function readCtx(wc) {
   const raw = await evalWithTimeout(wc, CTX_EXPR, CTX_TIMEOUT_MS, null);
   try { return JSON.parse(raw); } catch (_) { return null; }
 }
-function buildPayload(ctx) {
+async function buildPayload(ctx) {
   if (!ctx || typeof ctx.convId !== 'string' || !UUID_RE.test(ctx.convId)) return null;
-  const payload = store.snapshotForId(ctx.convId.toLowerCase());
-  if (!payload || !payload.ok) return null;
+  const payload = await statistics.snapshotForId(ctx.convId.toLowerCase());
+  if (!payload?.ok) throw new Error(payload?.error || 'Statistics unavailable');
   return { ...payload, bindSource: 'uuid', title: ctx.title || payload.title };
 }
 let refreshQueued = false;
@@ -182,8 +183,8 @@ async function pump() {
       attached.has(wc) && shouldInject(safeUrl(wc))).map(async (wc) => {
       const url = safeUrl(wc);
       let payload = null;
-      try { payload = buildPayload(await readCtx(wc)); }
-      catch (e) { log('[frame-fail] ' + ((e && e.message) || e)); }
+      try { payload = await buildPayload(await readCtx(wc)); }
+      catch (e) { log('[frame-fail] ' + ((e && e.message) || e)); return; }
       if (safeUrl(wc) !== url || wc.isDestroyed()) return;
       pushTo(wc, payload);
       if (!payload) return;
@@ -191,11 +192,11 @@ async function pump() {
       const c = payload.context;
       const s = payload.subagents;
       const bindKey = (payload.conversationId || '-') + '|' + payload.bindSource;
-      if (bindKey !== lastBindKey) { // 绑定变化才记日志（SPEC-2 验证节要求的绑定行）
+      if (bindKey !== lastBindKey) { // 绑定变化才记日志（绑定变化时记日志）
         lastBindKey = bindKey;
         log('[ctx] session binding changed');
       }
-      const key = [payload.conversationId, payload.turns, payload.steps, payload.latestSpeed,
+      const key = [payload.conversationId, payload.turns, payload.steps, payload.latestRequestSpeed,
         t && t.total, t && t.cachePercent, s && s.total, c && c.used, c && c.limit, c?.awaitingSample].join('|');
       if (key !== lastFrameKey) { // 数值变化才记日志
         lastFrameKey = key;
@@ -225,6 +226,31 @@ try {
   if (app.isReady()) { scan(); pump(); } else {
     app.on('ready', () => { try { scan(); pump(); } catch (_) {} });
   }
+  // Coalesce bursts from the database and its WAL; polling still covers missed filesystem events.
+  let dbWakeup = null;
+  const dbWatchers = [];
+  const wakeOnDatabaseWrite = (_event, name) => {
+    if (name && !/\.db(?:-wal)?$/i.test(name)) return;
+    if (dbWakeup) return;
+    dbWakeup = setTimeout(() => { dbWakeup = null; requestRefresh(); }, 100);
+    dbWakeup.unref?.();
+  };
+  if (typeof store.antigravityDir === 'function') {
+    const base = store.antigravityDir();
+    for (const dir of [base, path.join(base, 'conversations')]) {
+      try {
+        const watcher = fs.watch(dir, wakeOnDatabaseWrite);
+        dbWatchers.push(watcher);
+        watcher.on('error', () => watcher.close());
+        watcher.unref();
+      } catch (_) { /* Some installations create the directory later; polling covers it. */ }
+    }
+  }
+  app.on('will-quit', () => {
+    statistics.close();
+    if (dbWakeup) clearTimeout(dbWakeup);
+    for (const watcher of dbWatchers) watcher.close();
+  });
   const timer = setInterval(() => pump().catch(() => {}), POLL_MS);
   if (timer && typeof timer.unref === 'function') timer.unref();
 } catch (e) {

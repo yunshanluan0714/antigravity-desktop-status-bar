@@ -4,13 +4,13 @@
  * 导出值为 IIFE 字符串，主进程通过 webContents.executeJavaScript 执行。
  * 幂等：同一文档重复执行直接退出；导航后由主进程重注入。
  *
- * 位置（SPEC-2 修正 A）：状态栏插到对话输入框（composer 卡片）正下方的文档流里，
+ * 位置：状态栏插到对话输入框（composer 卡片）正下方的文档流里，
  * 不再是窗口底边的 fixed overlay；找不到 composer → 整条隐藏。
  * composer 定位（实测选择器，见 test/dom-probe.json 与 README-DESKTOP「绑定来源」）：
  *   主选 .surface-composer（含输入框 + 底部模型选择行的带边框卡片），
  *   兜底为输入框向上 6 层内第一个带边框/圆角的块级容器，最终兜底为输入框直接父级。
  *
- * 绑定（SPEC-2 修正 B）：window.__agySbCtx() 供主进程每轮轮询调用，返回 {convId?, title?}：
+ * 绑定：window.__agySbCtx() 供主进程每轮轮询调用，返回 {convId?, title?}：
  *   1. 侧栏选中行 [data-testid="conversation-row-sidebar"][data-selected="true"]
  *      的 data-cascade-id（实测即会话 uuid）+ 行内首个 span 的纯标题；
  *   2. 顶栏面包屑标题（对话视图标题条 span.truncate 叶子，排除侧栏内部与窗口菜单区）。
@@ -107,7 +107,7 @@ function agyStatusBarInstall() {
   let active = null;
   let panelKey = '';
   const exact = (n) => Number.isFinite(n) ? n.toLocaleString('zh-CN') : null;
-  const tps = (n) => Number.isFinite(n) ? (n >= 10 ? Math.round(n) : Math.round(n * 10) / 10) + ' tok/s' : null;
+  const tps = (n, precise = false) => Number.isFinite(n) ? (precise || n < 10 ? n.toFixed(1) : Math.round(n)) + ' tok/s' : null;
   function duration(ms) {
     if (!Number.isFinite(ms)) return null;
     const seconds = ms / 1000;
@@ -125,10 +125,10 @@ function agyStatusBarInstall() {
     const t = p.tokens;
     const c = p.context;
     const sub = p.subagents;
-    if (trigger === s1) return ['速度详情', tps(p.latestSpeed ?? d?.average), [
+    if (trigger === s1) return ['速度详情', tps(p.latestRequestSpeed, true), [
       ['模型用时', duration(d?.llmMs)], ['工具调用用时', duration(d?.toolMs) ?? '—'],
       ['首 token 平均（TTFT）', duration(d?.ttftMs)],
-      ['平均输出速度', tps(d?.average)],
+      ['平均输出速度', tps(d?.average, true)],
     ]];
     if (trigger === s2) return ['Token 用量', tokens(t?.total), usageRows(t)];
     if (trigger === s3) return ['子代理用量', tokens(sub?.total), [
@@ -162,6 +162,7 @@ function agyStatusBarInstall() {
       panel.setAttribute('aria-label', title);
       headingLabel.replaceChildren(active.querySelector('svg').cloneNode(true), document.createTextNode(title));
       headingValue.textContent = value || '';
+      headingValue.title = active === s1 ? '最近一次已完成的模型请求' : '';
       details.replaceChildren(...rows.filter(([, v]) => v != null).flatMap(([label, v]) => {
         const term = document.createElement('dt'), desc = document.createElement('dd');
         term.style.margin = '0';
@@ -346,9 +347,9 @@ function agyStatusBarInstall() {
     // ① 时钟：N轮 M步 · S tok/s
     if (p.turns != null || p.steps != null) {
       var t1 = (p.turns ?? '--') + ' 轮 ' + (p.steps ?? '--') + ' 步';
-      const latest = tps(p.latestSpeed ?? p.speed?.average);
+      const latest = tps(p.latestRequestSpeed);
       if (latest) t1 += ' · ' + latest;
-      show(s1, t1);
+      show(s1, t1, latest ? '最近一次已完成的模型请求的输出速度' : '暂无已完成的模型速度样本');
       shown += 1;
     } else { hide(s1); }
     // ② 数据库：X tok · 缓存命中 P%

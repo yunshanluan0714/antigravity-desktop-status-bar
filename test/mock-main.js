@@ -4,7 +4,7 @@
  * 用 Module._load 拦截 require('electron')，驱动 3 个轮询周期，断言：
  *   - 轮询间隔 2000ms；ready/browser-window-created/web-contents-created 均已注册；
  *   - payload 字段完整（含 bindSource）；executeJavaScript 轮询串以
- *     window.__agySb&&window.__agySb( 开头；每轮先取 window.__agySbCtx()（SPEC-2）；
+ *     window.__agySb&&window.__agySb( 开头；每轮先取 window.__agySbCtx()；
  *   - 过滤规则生效（外部 https 窗口被跳过）；日志写入 userData，含 [ctx] 绑定行；
  *   - renderer.js：不再含 position:fixed（窗口底边 overlay 废弃），含
  *     surface-composer 锚点、__agySbCtx、MutationObserver/ResizeObserver。
@@ -17,6 +17,7 @@ const assert = require('assert');
 
 const WRAPPER = path.join(__dirname, '..', 'wrapper');
 const TMP = path.join(os.tmpdir(), 'agy-statusbar-mock-' + Date.now());
+fs.mkdirSync(path.join(TMP, 'conversations'), { recursive: true });
 
 let failures = 0;
 function check(name, fn) {
@@ -79,7 +80,8 @@ const Module = require('module');
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (request === 'electron') return electronStub;
-  if (request === './lib/store') return { snapshotForId: (id) => ({ ok:true, conversationId:id, title:'Fixture', running:false, turns:1, steps:2, latestSpeed:null, tokens:null, context:null, subagents:null }) };
+  if (request === './lib/store') return { antigravityDir: () => TMP };
+  if (request === './snapshot-worker') return { close() {}, snapshotForId: async (id) => ({ ok:true, conversationId:id, title:'Fixture', running:false, turns:1, steps:2, latestSpeed:null, tokens:null, context:null, subagents:null }) };
   return origLoad.call(this, request, parent, isMain);
 };
 require(path.join(WRAPPER, 'statusbar.js'));
@@ -144,7 +146,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.ok(pushes.length >= 3, 'pushes=' + pushes.length);
     for (const p of pushes) assert.ok(p.startsWith(PREFIX));
   });
-  check('轮询先取 window.__agySbCtx()（SPEC-2 绑定路径）', () => {
+  check('轮询先取 window.__agySbCtx()（绑定路径）', () => {
     // 汇总所有已注入窗口的 ctx 读取次数（每轮每窗口 1 次；初始 pump 与循环 pump
     // 的交错可能使轮数少一次，断言 ≥3 证明 ctx 路径在多个轮询周期真实执行）
     const ctxReads = windows.flatMap((w) => w.webContents._calls).filter((c) => c === CTX_READ);
@@ -176,6 +178,17 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(JSON.parse(frame.slice(PREFIX.length, -1)).conversationId, id2);
   });
 
+  appWin.webContents.context = { convId: id1 };
+  fs.writeFileSync(path.join(TMP, 'conversations', id1 + '.db-wal'), 'test write');
+  const deadline = Date.now() + 1200;
+  while (Date.now() < deadline && !appWin.webContents._calls.at(-1)?.includes(id1)) {
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  check('database write triggers a refresh without the polling timer', () => {
+    const last = appWin.webContents._calls.at(-1);
+    assert.ok(last.startsWith(PREFIX) && last.includes(id1));
+  });
+
   appWin.webContents.context = { title: 'Fixture' };
   await pumpFn();
   check('missing ID clears previous payload instead of guessing', () => {
@@ -194,12 +207,12 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.ok(script.startsWith('(function agyStatusBarInstall'));
     assert.ok(script.endsWith(')();'));
   });
-  check('renderer.js 不再是窗口底边 overlay（SPEC-2 修正 A）', () => {
+  check('renderer.js 不再是窗口底边 overlay', () => {
     const script = require(path.join(WRAPPER, 'renderer.js'));
     assert.ok(script.includes('position:static'), '应为文档流内嵌');
     assert.ok(script.includes('surface-composer'), 'composer 锚点选择器应来自实测');
   });
-  check('renderer.js 含 __agySbCtx 与观测器（SPEC-2 修正 B / 稳定性）', () => {
+  check('renderer.js 含 __agySbCtx 与观测器（稳定性）', () => {
     const script = require(path.join(WRAPPER, 'renderer.js'));
     assert.ok(script.includes('__agySbCtx'));
     assert.ok(script.includes('data-cascade-id'), 'uuid 来源选择器应来自实测');
@@ -216,12 +229,13 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.ok(content.includes('[win] inject=yes'));
     assert.ok(content.includes('[inject-ok] renderer installed'));
     assert.ok(content.includes('[frame]'));
-    assert.ok(content.includes('[ctx] session binding changed'), 'SPEC-2 要求的绑定行');
+    assert.ok(content.includes('[ctx] session binding changed'));
     assert.ok(!content.includes('example.com'));
     assert.ok(!content.includes(id1));
     assert.ok(!content.includes('Fixture'));
   });
 
+  emit('will-quit');
   if (failures === 0) {
     try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {}
     console.log('\n全部通过');

@@ -1,4 +1,4 @@
-param([switch]$Remove)
+﻿param([switch]$Remove)
 $ErrorActionPreference = 'Stop'
 $src = (Resolve-Path (Join-Path $PSScriptRoot '..\wrapper')).Path
 $homeDir = Join-Path $env:LOCALAPPDATA 'AntigravityStatusBar'
@@ -38,7 +38,7 @@ foreach ($link in $links) {
     }
 }
 New-Item -ItemType Directory -Path $homeDir -Force | Out-Null
-foreach ($file in @('launch.vbs', 'watcher.js', 'hook.cjs', 'statusbar.js', 'renderer.js', 'lib')) {
+foreach ($file in @('launch.vbs', 'watcher.js', 'hook.cjs', 'statusbar.js', 'snapshot-worker.js', 'renderer.js', 'lib')) {
     Copy-Item -LiteralPath (Join-Path $src $file) -Destination $homeDir -Recurse -Force
 }
 foreach ($link in $links) {
