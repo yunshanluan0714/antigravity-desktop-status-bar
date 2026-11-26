@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const { Worker, isMainThread, parentPort } = require('node:worker_threads');
 
 if (!isMainThread) {

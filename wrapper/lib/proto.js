@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * 通用 protobuf wire-format 解码。
  *

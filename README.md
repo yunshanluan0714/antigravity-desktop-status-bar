@@ -1,13 +1,14 @@
 # Antigravity Desktop Status Bar
 
-给 Windows 版 **Google Antigravity Desktop** 的输入框下方加一条 DSH 风格的会话状态栏。统计跟随当前会话，点击各项可打开详情。
+给 Windows 版 **Google Antigravity Desktop** 的输入框底部工具行加一条 DSH 风格会话状态栏。统计跟随当前会话，点击各项可打开详情。
 
 > Unofficial, local-only status bar for Google Antigravity Desktop on Windows. Not a VS Code extension and not affiliated with Google or DeepSeek.
 
 ## 显示什么
 
-- **会话与速度**：轮数、模型步数、最近一次已完成模型请求的输出速度；详情有模型用时、工具调用用时、平均首 token 时间和全会话平均输出速度（两者口径不同，不互相填补）。
-- **Token 用量**：未缓存输入、缓存读取、输出和缓存命中率。
+- **会话与速度**：状态栏嵌在输入框底部工具行，采用较大字号显示最近一次生成速度；轮数和步数收进详情。详情还显示模型用时、工具调用用时、首 token 平均（TTFT）和平均输出速度，速度来自本地库官方记录的首 token 与流式耗时字段。
+- **额度环**：同心环外圈显示五小时额度剩余，内扇形显示周额度剩余；位于状态栏最左侧，内外圈使用不同颜色且不加分隔线。悬停不弹说明，点击查看剩余比例和重置时间。额度池按输入框当前模型选择：Gemini 使用 Gemini 池，Claude/GPT 使用共享池；数据通过本机 Antigravity Hub 查询。
+- **Token 用量**：显示总量、未缓存输入、缓存读取、输出和缓存命中率；Token 总量前不放图标。
 - **子代理**：按已记录的父子会话关系统计，显示真实子代理名称，不把主会话的历史轨迹或模型名算成子代理。
 - **上下文**：显示最近一次有效采样的占用率。完成压缩后，若还没有新样本，显示「待采样」，直到下一次模型请求记录新值。
 

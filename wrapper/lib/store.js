@@ -150,17 +150,11 @@ function applyConversation(result, conv) {
     result.context = { used: conv.context.used, limit: null, percent: null };
   }
   if (conv.timing) {
-    const { decodeMs, outputTokens, llmMs, toolMs, ttftMs, ttftCount } = conv.timing;
-    result.speed = {
-      average: decodeMs > 0 ? outputTokens * 1000 / decodeMs : null,
-      llmMs: llmMs || null,
-      ttftMs: ttftCount ? ttftMs / ttftCount : null,
-      toolMs,
-    };
-  }
-  result.latestRequestSpeed = conv.latestRequestSpeed ?? null;
-  if (conv.latestStep && conv.latestStep.decodeMs > 0 && conv.latestStep.outputTokens > 0) {
-    result.latestSpeed = conv.latestStep.outputTokens / (conv.latestStep.decodeMs / 1000);
+    result.speed = { llmMs: conv.timing.llmMs || null, toolMs: conv.timing.toolMs ?? null };
+    if (conv.latestSpeed) {
+      result.speed.latest = conv.latestSpeed;
+      result.speed.average = conv.averageSpeed;
+    }
   }
 }
 
@@ -205,7 +199,6 @@ function emptySnapshot() {
     tokens: null,
     context: null,
     subagents: null,
-    latestSpeed: null, latestRequestSpeed: null,
   };
 }
 
@@ -277,7 +270,7 @@ function findByTitle(title) {
 /**
  * 启发式挑活跃会话并汇总其完整快照（兜底路径）。
  * 返回 { ok, conversationId, title, turns, steps, tokens, context, subagents,
- *        latestSpeed, running, error }
+ *        running, error }
  */
 function snapshot() {
   try {

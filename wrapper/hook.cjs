@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * Antigravity 桌面端 DSH 风格状态栏 — 注入入口（hook）。
  *

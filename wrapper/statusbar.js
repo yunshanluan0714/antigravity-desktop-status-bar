@@ -11,6 +11,7 @@ const path = require('path');
 const fs = require('fs');
 const electron = require('electron');
 const store = require('./lib/store');
+const quota = require('./lib/quota');
 const statistics = require('./snapshot-worker');
 const renderer = require('./renderer');
 
@@ -167,7 +168,15 @@ async function buildPayload(ctx) {
   if (!ctx || typeof ctx.convId !== 'string' || !UUID_RE.test(ctx.convId)) return null;
   const payload = await statistics.snapshotForId(ctx.convId.toLowerCase());
   if (!payload?.ok) throw new Error(payload?.error || 'Statistics unavailable');
-  return { ...payload, bindSource: 'uuid', title: ctx.title || payload.title };
+  const quotaPools = await quota.getQuotaPools();
+  return {
+    ...payload,
+    bindSource: 'uuid',
+    title: ctx.title || payload.title,
+    modelName: ctx.modelName || null,
+    modelFamily: ctx.modelFamily || null,
+    quotaPools,
+  };
 }
 let refreshQueued = false;
 function requestRefresh() {
@@ -196,7 +205,7 @@ async function pump() {
         lastBindKey = bindKey;
         log('[ctx] session binding changed');
       }
-      const key = [payload.conversationId, payload.turns, payload.steps, payload.latestRequestSpeed,
+      const key = [payload.conversationId, payload.turns, payload.steps,
         t && t.total, t && t.cachePercent, s && s.total, c && c.used, c && c.limit, c?.awaitingSample].join('|');
       if (key !== lastFrameKey) { // 数值变化才记日志
         lastFrameKey = key;

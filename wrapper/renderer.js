@@ -1,54 +1,21 @@
-﻿'use strict';
-/**
- * 注入用渲染脚本（DSH 风格四段状态栏）。
- * 导出值为 IIFE 字符串，主进程通过 webContents.executeJavaScript 执行。
- * 幂等：同一文档重复执行直接退出；导航后由主进程重注入。
- *
- * 位置：状态栏插到对话输入框（composer 卡片）正下方的文档流里，
- * 不再是窗口底边的 fixed overlay；找不到 composer → 整条隐藏。
- * composer 定位（实测选择器，见 test/dom-probe.json 与 README-DESKTOP「绑定来源」）：
- *   主选 .surface-composer（含输入框 + 底部模型选择行的带边框卡片），
- *   兜底为输入框向上 6 层内第一个带边框/圆角的块级容器，最终兜底为输入框直接父级。
- *
- * 绑定：window.__agySbCtx() 供主进程每轮轮询调用，返回 {convId?, title?}：
- *   1. 侧栏选中行 [data-testid="conversation-row-sidebar"][data-selected="true"]
- *      的 data-cascade-id（实测即会话 uuid）+ 行内首个 span 的纯标题；
- *   2. 顶栏面包屑标题（对话视图标题条 span.truncate 叶子，排除侧栏内部与窗口菜单区）。
- *
- * 数据契约（window.__agySb(payload)）：store.snapshotForId/snapshot 形状：
- *   { ok, conversationId, title, bindSource, turns, steps,
- *     tokens:{fresh,cached,output,total,cachePercent}|null,
- *     context:{used,limit,percent}|null,
- *     subagents:{total,percent}|null, latestSpeed, subTrails?:{count,ids[]} }
- * 某段数据 null/undefined → 该段整段隐藏；全部为空 → 整条隐藏。
- */
-
+'use strict';
+/** Composer 内嵌状态栏。对齐模型选择器与右侧工具栏之间，不占用卡片外宽度。 */
 function agyStatusBarInstall() {
-  if (window.__agySb) return; // 已注入：仅更新不重注
+  if (window.__agySb) return;
   var ICON_CLOCK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.4 12.4a6.4 6.4 0 1 1 11.2 0M8 9.9 10.6 6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="10.2" r="1.1" fill="currentColor"/></svg>';
-  var ICON_DB = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>';
-  var ICON_FORK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2"/><path d="M18 10.4c0 3.6-4 4.6-9.4 5.4"/></svg>';
+  var ICON_FORK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2M18 10.4c0 3.6-4 4.6-9.4 5.4"/></svg>';
   var RING_C = 2 * Math.PI * 5;
+  var QUOTA_OUTER_C = 2 * Math.PI * 10.4;
   var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   var bar = document.createElement('div');
   bar.id = 'agy-sb';
   bar.className = 'text-muted-foreground';
   bar.hidden = true;
-  const layout = document.createElement('style');
-  layout.textContent = `
-    #agy-sb:not([hidden]) { display: flex; }
-    /* Keep the stock footer spacing on views without the status bar. */
-    [data-agy-compact-footer]:has(.surface-composer + #agy-sb:not([hidden])) {
-      padding-bottom: 4px;
-    }
-  `;
-  document.head.appendChild(layout);
-  // 文档流内嵌（不再 fixed）：宽度 100% 继承 composer 卡片宽度，紧跟其后
-  bar.style.cssText = 'position:static;width:100%;margin:4px 0 0;'
-    + 'box-sizing:border-box;align-items:center;justify-content:center;gap:min(12px,1vw);padding:0 4px;font-variant-numeric:tabular-nums;'
-    + 'font:11px "Segoe UI",sans-serif;pointer-events:none;user-select:none;'
-    + 'line-height:22px;height:22px;white-space:nowrap;';
+  bar.style.cssText = 'position:static;display:inline-flex;width:auto;max-width:56%;margin:0 auto;'
+    + 'box-sizing:border-box;align-items:center;justify-content:center;gap:3px;padding:0 3px;'
+    + 'font:12px "Segoe UI",sans-serif;font-variant-numeric:tabular-nums;pointer-events:none;user-select:none;'
+    + 'line-height:24px;height:30px;white-space:nowrap;vertical-align:middle;flex:0 1 auto;min-width:0;';
 
   function seg(iconSvg) {
     var s = document.createElement('button');
@@ -56,14 +23,22 @@ function agyStatusBarInstall() {
     s.className = 'bg-transparent hover:bg-secondary hover:text-foreground';
     s.setAttribute('aria-haspopup', 'dialog');
     s.setAttribute('aria-expanded', 'false');
-    s.style.cssText = 'display:inline-flex;align-items:center;gap:6px;pointer-events:auto;cursor:pointer;flex:0 1 auto;min-width:0;border:0;border-radius:6px;padding:1px 8px;font:inherit;line-height:20px;white-space:nowrap;';
-    s.innerHTML = iconSvg + '<span class="agy-sb-v" style="overflow:hidden;text-overflow:ellipsis"></span>';
-    s.querySelector('svg').style.flexShrink = '0';
+    s.style.cssText = 'display:inline-flex;align-items:center;gap:5px;pointer-events:auto;cursor:pointer;'
+      + 'flex:0 1 auto;min-width:0;border:0;border-radius:5px;padding:1px 6px;font:inherit;line-height:24px;white-space:nowrap;';
+    s.innerHTML = (iconSvg || '') + '<span class="agy-sb-v" style="overflow:hidden;text-overflow:ellipsis"></span>';
+    const icon = s.querySelector('svg');
+    if (icon) icon.style.flexShrink = '0';
     bar.appendChild(s);
     return s;
   }
+  var s5 = seg('<svg class="agy-quota-ring" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">'
+    + '<circle cx="12" cy="12" r="10.4" fill="none" stroke="currentColor" stroke-opacity=".22" stroke-width="1.5"/>'
+    + '<circle class="agy-quota-five" cx="12" cy="12" r="10.4" fill="none" stroke="currentColor" stroke-width="1.5"'
+    + ' stroke-linecap="round" stroke-dasharray="0 ' + QUOTA_OUTER_C.toFixed(2) + '" transform="rotate(-90 12 12)"/>'
+    + '<path class="agy-quota-weekly" fill="currentColor" fill-opacity=".45" d=""/>'
+    + '</svg>');
   var s1 = seg(ICON_CLOCK);
-  var s2 = seg(ICON_DB);
+  var s2 = seg(''); // token count has no leading database icon
   var s3 = seg(ICON_FORK);
   var s4 = seg('<svg width="14" height="14" viewBox="0 0 12 12" aria-hidden="true">'
     + '<circle cx="6" cy="6" r="5" fill="none" stroke="currentColor" stroke-opacity="0.25" stroke-width="2"/>'
@@ -79,22 +54,22 @@ function agyStatusBarInstall() {
   panel.tabIndex = -1;
   panel.className = 'bg-card text-muted-foreground';
   panel.style.cssText = 'position:fixed;inset:auto;margin:0;box-sizing:border-box;'
-    + 'min-width:min(280px,calc(100vw - 24px));max-width:min(420px,calc(100vw - 24px));'
-    + 'max-height:calc(100vh - 24px);width:max-content;overflow:auto;padding:16px;'
+    + 'min-width:min(300px,calc(100vw - 24px));max-width:min(460px,calc(100vw - 24px));'
+    + 'max-height:calc(100vh - 24px);width:max-content;overflow:auto;padding:18px;'
     + 'border:1px solid var(--card-border,transparent);border-radius:10px;'
-    + 'box-shadow:0 8px 28px rgba(0,0,0,.18);font:12px/18px "Segoe UI",sans-serif;';
+    + 'box-shadow:0 8px 28px rgba(0,0,0,.18);font:13px/20px "Segoe UI",sans-serif;';
   document.body.appendChild(panel);
   const heading = document.createElement('div');
   heading.className = 'text-foreground';
-  heading.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;'
-    + 'font-weight:500;border-bottom:1px solid var(--card-border,transparent);padding-bottom:8px;margin-bottom:10px;';
+  heading.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:18px;'
+    + 'font-size:14px;font-weight:500;border-bottom:1px solid var(--card-border,transparent);padding-bottom:10px;margin-bottom:12px;';
   const headingLabel = document.createElement('span');
   headingLabel.style.cssText = 'display:inline-flex;align-items:center;gap:6px;';
   const headingValue = document.createElement('span');
   headingValue.style.cssText = 'font-variant-numeric:tabular-nums;white-space:nowrap;';
   heading.append(headingLabel, headingValue);
   const details = document.createElement('dl');
-  details.style.cssText = 'display:grid;grid-template-columns:minmax(76px,auto) minmax(0,1fr);gap:6px 16px;margin:0;';
+  details.style.cssText = 'display:grid;grid-template-columns:minmax(76px,auto) minmax(0,1fr);gap:8px 18px;margin:0;';
   const meter = document.createElement('div');
   meter.className = 'bg-secondary';
   meter.style.cssText = 'height:4px;overflow:hidden;border-radius:4px;';
@@ -107,7 +82,6 @@ function agyStatusBarInstall() {
   let active = null;
   let panelKey = '';
   const exact = (n) => Number.isFinite(n) ? n.toLocaleString('zh-CN') : null;
-  const tps = (n, precise = false) => Number.isFinite(n) ? (precise || n < 10 ? n.toFixed(1) : Math.round(n)) + ' tok/s' : null;
   function duration(ms) {
     if (!Number.isFinite(ms)) return null;
     const seconds = ms / 1000;
@@ -116,24 +90,49 @@ function agyStatusBarInstall() {
     return Math.floor(whole / 60) + '分' + whole % 60 + '秒';
   }
   const tokens = (n) => Number.isFinite(n) ? exact(n) + ' tok' : null;
+  const tps = (n) => Number.isFinite(n) ? (n < 10 ? n.toFixed(1) : Math.round(n)) + ' tok/s' : null;
   const usageRows = (u) => [
     ['缓存命中', pct(u?.cachePercent)], ['未缓存输入', tokens(u?.fresh)],
     ['缓存读取', tokens(u?.cached)], ['输出', tokens(u?.output)],
   ];
+  function quotaSector(fraction) {
+    if (!Number.isFinite(fraction) || fraction <= 0) return '';
+    const r = 6.25, cx = 12, cy = 12;
+    if (fraction >= 0.9999) return 'M12 12 m0 -' + r + ' a' + r + ' ' + r + ' 0 1 1 0 ' + (2 * r) + ' a' + r + ' ' + r + ' 0 1 1 0 -' + (2 * r) + ' Z';
+    const angle = fraction * Math.PI * 2;
+    const x = cx + r * Math.sin(angle), y = cy - r * Math.cos(angle);
+    return 'M' + cx + ' ' + cy + ' L' + cx + ' ' + (cy - r) + ' A' + r + ' ' + r + ' 0 '
+      + (fraction > 0.5 ? 1 : 0) + ' 1 ' + x.toFixed(3) + ' ' + y.toFixed(3) + ' Z';
+  }
+  function resetTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
   function panelData(trigger, p) {
     const d = p.speed;
     const t = p.tokens;
     const c = p.context;
     const sub = p.subagents;
-    if (trigger === s1) return ['速度详情', tps(p.latestRequestSpeed, true), [
-      ['模型用时', duration(d?.llmMs)], ['工具调用用时', duration(d?.toolMs) ?? '—'],
-      ['首 token 平均（TTFT）', duration(d?.ttftMs)],
-      ['平均输出速度', tps(d?.average, true)],
+    const pool = (p.quotaPools || []).find((item) => item.kind === p.modelFamily);
+    if (trigger === s1) return ['速度详情', tps(d?.latest?.show), [
+      ['轮数', p.turns == null ? null : p.turns + ' 轮'],
+      ['步数', p.steps == null ? null : p.steps + ' 步'],
+      ['模型用时', duration(d?.llmMs)],
+      ['工具调用用时', duration(d?.toolMs) ?? '—'],
+      ['首 token 平均（TTFT）', duration(d?.average?.ttftMs)],
+      ['平均输出速度', tps(d?.average?.show)],
     ]];
     if (trigger === s2) return ['Token 用量', tokens(t?.total), usageRows(t)];
     if (trigger === s3) return ['子代理用量', tokens(sub?.total), [
       ['子代理', sub?.entries ? sub.entries.length + ' 个' : null], ...usageRows(sub),
       ...(sub?.entries || []).map((entry) => [entry.name || '未命名子代理 ' + entry.id.slice(0, 8), entry.total == null ? '—' : fmt(entry.total) + ' tok']),
+    ]];
+    if (trigger === s5) return ['额度', p.modelName || pool?.name || null, [
+      ['五小时剩余', pool?.fiveHour ? pct(pool.fiveHour.remainingFraction * 100) : '暂无数据'],
+      ['五小时重置', resetTime(pool?.fiveHour?.resetTime)],
+      ['周额度剩余', pool?.weekly ? pct(pool.weekly.remainingFraction * 100) : '暂无数据'],
+      ['周额度重置', resetTime(pool?.weekly?.resetTime)],
     ]];
     if (c?.awaitingSample) return ['上下文已压缩', null, [['占用率', '等待下一次模型请求']]];
     const contextValue = Number.isFinite(c?.used) && Number.isFinite(c?.limit) ? '~' + fmt(c.used) + ' / ' + fmt(c.limit) : null;
@@ -160,9 +159,9 @@ function agyStatusBarInstall() {
       meter.style.display = isContext && Number.isFinite(percent) ? 'block' : 'none';
       filled.style.width = Math.min(100, Math.max(0, percent || 0)) + '%';
       panel.setAttribute('aria-label', title);
-      headingLabel.replaceChildren(active.querySelector('svg').cloneNode(true), document.createTextNode(title));
+      headingLabel.replaceChildren(...(active.querySelector('svg') ? [active.querySelector('svg').cloneNode(true)] : []), document.createTextNode(title));
       headingValue.textContent = value || '';
-      headingValue.title = active === s1 ? '最近一次已完成的模型请求' : '';
+      headingValue.title = active === s1 ? '最近一次已完成的模型请求的输出速度' : '';
       details.replaceChildren(...rows.filter(([, v]) => v != null).flatMap(([label, v]) => {
         const term = document.createElement('dt'), desc = document.createElement('dd');
         term.style.margin = '0';
@@ -186,7 +185,7 @@ function agyStatusBarInstall() {
     panel.hidePopover();
     if (restoreFocus) trigger.focus();
   }
-  for (const trigger of [s1, s2, s3, s4]) {
+  for (const trigger of [s1, s2, s3, s4, s5]) {
     trigger.setAttribute('aria-controls', panel.id);
     trigger.addEventListener('click', () => {
       if (active === trigger) { closePanel(true); return; }
@@ -212,45 +211,63 @@ function agyStatusBarInstall() {
   window.addEventListener('scroll', positionPanel, true);
 
 
-  /** 输入框可见才算"有 composer"；否则整条隐藏（绝不退回窗口底边样式）。 */
   function findComposerCard() {
     const card = document.getElementById('antigravity.agentSidePanelInputBox');
     return card && card.classList.contains('surface-composer') && visible(card) ? card : null;
   }
-  let compactFooter = null;
-  function tightenFooter() {
-    if (compactFooter?.contains(bar)) return;
-    compactFooter?.removeAttribute('data-agy-compact-footer');
-    compactFooter = null;
-    const edge = bar.getBoundingClientRect().bottom;
-    // shortcut: detect the footer by its existing bottom inset; recheck if the host adds a separate footer surface.
-    for (let el = bar.parentElement; el && el !== document.body; el = el.parentElement) {
-      const inset = parseFloat(getComputedStyle(el).paddingBottom);
-      if (inset < 12 || !Number.isFinite(inset)) continue;
-      if (Math.abs(el.getBoundingClientRect().bottom - edge - inset) > 4) continue;
-      compactFooter = el;
-      el.setAttribute('data-agy-compact-footer', '');
-      break;
-    }
+  function findModelControl(card) {
+    return [...card.querySelectorAll('button,[role="button"]')].find((el) => {
+      if (!visible(el)) return false;
+      const label = [el.innerText, el.textContent, el.getAttribute('aria-label'), el.getAttribute('title')]
+        .filter(Boolean).join(' ');
+      return /\b(?:Gemini|Claude|GPT)\b/i.test(label);
+    }) || null;
   }
-  var placedFor = null; // 上次放置时用的锚点（防重复 insertBefore）
+  function findToolbar(card, modelControl) {
+    const cardWidth = card.getBoundingClientRect().width;
+    for (let el = modelControl.parentElement; el && el !== card; el = el.parentElement) {
+      const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+      if (style.display === 'flex' && style.flexDirection !== 'column'
+          && rect.width >= cardWidth * 0.82 && rect.height >= 22 && rect.height <= 64) return el;
+    }
+    return null;
+  }
+  function childContaining(parent, target) {
+    let node = target;
+    while (node && node.parentElement !== parent) node = node.parentElement;
+    return node?.parentElement === parent ? node : null;
+  }
+  function findPlacement() {
+    let card = null, control = null, row = null, leftGroup = null;
+    try {
+      card = findComposerCard();
+      control = card && findModelControl(card);
+      row = control && findToolbar(card, control);
+      leftGroup = row && childContaining(row, control);
+    } catch (_) {}
+    return card && control && row && leftGroup ? { card, control, row, leftGroup } : null;
+  }
+  let placedFor = null;
+  let placedAfter = null;
   function place() {
-    var anchor = null;
-    try { anchor = findComposerCard(); } catch (_) { anchor = null; }
-    if (!anchor) {
+    const placement = findPlacement();
+    if (!placement) {
       closePanel();
       bar.hidden = true;
-      placedFor = null;
+      placedFor = placedAfter = null;
       return false;
     }
-    if (placedFor === anchor && bar.isConnected && bar.previousElementSibling === anchor) return true;
+    const { row, leftGroup } = placement;
+    if (placedFor === row && placedAfter === leftGroup && bar.parentElement === row
+        && bar.previousElementSibling === leftGroup) return true;
     try {
-      if (anchor.parentElement) anchor.parentElement.insertBefore(bar, anchor.nextSibling);
-      placedFor = anchor;
-      if (ro) { try { ro.disconnect(); ro.observe(anchor); } catch (_) {} }
+      row.insertBefore(bar, leftGroup.nextSibling);
+      placedFor = row;
+      placedAfter = leftGroup;
+      if (ro) { try { ro.disconnect(); ro.observe(row); } catch (_) {} }
       return true;
     } catch (_) {
-      placedFor = null;
+      placedFor = placedAfter = null;
       return false;
     }
   }
@@ -268,16 +285,16 @@ function agyStatusBarInstall() {
           selectedId = id;
           console.info('[agy-statusbar:selection]');
         }
-        var anchor = findComposerCard();
-        if (!anchor) {
-          placedFor = null;
+        if (!matchesCurrent(lastPayload)) { closePanel(); bar.hidden = true; return; }
+        const placement = findPlacement();
+        if (!placement) {
+          placedFor = placedAfter = null;
           closePanel();
           bar.hidden = true;
           return;
         }
-        if (!matchesCurrent(lastPayload)) { closePanel(); bar.hidden = true; return; }
-        if (!bar.isConnected || bar.previousElementSibling !== anchor) {
-          placedFor = null;
+        if (!bar.isConnected || bar.parentElement !== placement.row || bar.previousElementSibling !== placement.leftGroup) {
+          placedFor = placedAfter = null;
           if (place() && lastPayload) update(lastPayload);
         }
       } catch (_) {}
@@ -310,7 +327,12 @@ function agyStatusBarInstall() {
     const convId = rows[0].getAttribute('data-cascade-id') || '';
     if (!UUID_RE.test(convId)) return null;
     const title = rows[0].querySelector('span')?.textContent?.trim();
-    return { convId: convId.toLowerCase(), title };
+    const modelControl = findModelControl(findComposerCard());
+    const modelName = [modelControl?.innerText, modelControl?.textContent, modelControl?.getAttribute('aria-label'), modelControl?.getAttribute('title')]
+      .find((value) => value && /\b(?:Gemini|Claude|GPT)\b/i.test(value))?.replace(/\s+/g, ' ').trim() || null;
+    const modelFamily = modelName && /\b(?:Claude|GPT)\b/i.test(modelName) ? 'claude-gpt'
+      : modelName && /\bGemini\b/i.test(modelName) ? 'gemini' : null;
+    return { convId: convId.toLowerCase(), title, modelName, modelFamily };
   };
   /* ---------- 渲染 ---------- */
 
@@ -325,11 +347,10 @@ function agyStatusBarInstall() {
     if (typeof p !== 'number' || !isFinite(p)) return null;
     return p.toFixed(1).replace(/\.0$/, '') + '%';
   }
-  function convId(p) { return p.conversationId ? String(p.conversationId).slice(0, 8) : '--'; }
-  function show(segEl, text, title) {
+  function show(segEl, text) {
     segEl.style.display = 'inline-flex';
     segEl.querySelector('.agy-sb-v').textContent = text;
-    if (title !== undefined) segEl.title = title;
+    segEl.removeAttribute('title');
   }
   function hide(segEl) { segEl.style.display = 'none'; }
 
@@ -344,53 +365,52 @@ function agyStatusBarInstall() {
     if (!place()) return; // 无可见 composer → 整条隐藏
     if (!matchesCurrent(p)) { closePanel(); bar.hidden = true; return; }
     var shown = 0;
-    // ① 时钟：N轮 M步 · S tok/s
-    if (p.turns != null || p.steps != null) {
-      var t1 = (p.turns ?? '--') + ' 轮 ' + (p.steps ?? '--') + ' 步';
-      const latest = tps(p.latestRequestSpeed);
-      if (latest) t1 += ' · ' + latest;
-      show(s1, t1, latest ? '最近一次已完成的模型请求的输出速度' : '暂无已完成的模型速度样本');
+    // ① 最近一次速度；轮数与步数只放在详情里。
+    if (p.turns != null || p.steps != null || Number.isFinite(p.speed?.latest?.show)) {
+      const latest = tps(p.speed?.latest?.show);
+      show(s1, latest || '— tok/s');
       shown += 1;
     } else { hide(s1); }
-    // ② 数据库：X tok · 缓存命中 P%
+    // ② Token：无前置图标，缩短占宽。
     if (p.tokens && p.tokens.total != null) {
-      var t2 = fmt(p.tokens.total) + ' tok';
-      var cp = pct(p.tokens.cachePercent);
-      if (cp) t2 += ' · 缓存命中 ' + cp;
-      var tip2 = '计费 token = 未缓存输入 + 缓存命中 + 输出'
-        + '\n未缓存 ' + fmt(p.tokens.fresh) + ' · 缓存 ' + fmt(p.tokens.cached) + ' · 输出 ' + fmt(p.tokens.output)
-        + '\n会话 ' + convId(p);
-      show(s2, t2, tip2);
+      show(s2, fmt(p.tokens.total) + ' tok');
       shown += 1;
     } else { hide(s2); }
-    // ③ 分叉：子代理 Y
+    // ③ 子代理：图标 + 总量即可；明细留给弹层。
     if (p.subagents && p.subagents.total != null) {
-      var tip3 = '子代理实际消耗的 token';
-      if (p.subagents.percent != null) tip3 += '（占全部 ' + pct(p.subagents.percent) + '）';
-      if (p.subagents.entries?.length) {
-        tip3 += '\n子代理 ' + p.subagents.entries.length + ' 条';
-      }
-      show(s3, '子代理 ' + fmt(p.subagents.total), tip3);
+      show(s3, fmt(p.subagents.total) + ' tok');
       shown += 1;
     } else { hide(s3); }
-    // ④ 圆环：上下文占用 Z%
+    // ④ 圆环：上下文占用。
     const ring = s4.querySelector('.agy-ring');
     ring.style.visibility = Number.isFinite(p.context?.percent) ? '' : 'hidden';
     if (p.context?.awaitingSample) {
-      show(s4, '待采样', '上下文已压缩，等待下一次模型请求记录新的占用量');
+      show(s4, '待采样');
       shown += 1;
     } else if (p.context && p.context.percent != null) {
       var on = Math.max(0, Math.min(100, p.context.percent)) / 100 * RING_C;
       ring.setAttribute('stroke-dasharray', on.toFixed(2) + ' ' + RING_C.toFixed(2));
-      var tip4 = '上下文窗口占用';
-      if (p.context.used != null) {
-        tip4 += '：已用 ' + p.context.used + (p.context.limit != null ? ' / 上限 ' + p.context.limit : '');
-      }
-      show(s4, Math.round(p.context.percent) + '%', tip4);
+      show(s4, Math.round(p.context.percent) + '%');
       shown += 1;
     } else { hide(s4); }
+    // ⑤ 同心额度环：外圈五小时，内扇形为周剩余。未识别模型时不猜额度池。
+    const pool = (p.quotaPools || []).find((item) => item.kind === p.modelFamily);
+    const five = s5.querySelector('.agy-quota-five');
+    const weekly = s5.querySelector('.agy-quota-weekly');
+    const fiveFraction = pool?.fiveHour?.remainingFraction;
+    const weeklyFraction = pool?.weekly?.remainingFraction;
+    five.setAttribute('stroke-dasharray', Number.isFinite(fiveFraction)
+      ? (QUOTA_OUTER_C * fiveFraction).toFixed(2) + ' ' + QUOTA_OUTER_C.toFixed(2)
+      : '0 ' + QUOTA_OUTER_C.toFixed(2));
+    weekly.setAttribute('d', quotaSector(weeklyFraction));
+    if (p.modelFamily) {
+      const fiveText = Number.isFinite(fiveFraction) ? pct(fiveFraction * 100) : '暂无数据';
+      const weeklyText = Number.isFinite(weeklyFraction) ? pct(weeklyFraction * 100) : '暂无数据';
+      show(s5, '');
+      s5.setAttribute('aria-label', (p.modelName || '当前模型') + '额度：五小时 ' + fiveText + '，周额度 ' + weeklyText);
+      shown += 1;
+    } else { hide(s5); }
     bar.hidden = shown === 0;
-    if (!bar.hidden) tightenFooter();
     if (active?.style.display === 'none') closePanel();
     else if (active) renderPanel();
   }

@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 const fs = require('node:fs');

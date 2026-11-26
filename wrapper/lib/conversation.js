@@ -24,6 +24,31 @@ function timestampMs(msg) {
   return seconds * 1000 + Math.floor((nanos || 0) / 1e6);
 }
 
+/** google.protobuf.Duration { seconds: 1, nanos: 2 } → 毫秒。 */
+function durationMs(raw) {
+  const msg = proto.asMessage(raw);
+  if (!msg) return null;
+  const seconds = proto.last(msg, 1);
+  const nanos = proto.last(msg, 2);
+  if (typeof seconds !== 'number' && typeof nanos !== 'number') return null;
+  return (seconds || 0) * 1000 + Math.floor((nanos || 0) / 1e6);
+}
+
+// tok/s 上限：超过它的流式速度只可能来自「先缓冲再瞬间刷出」，改显示端到端速度。
+const STREAM_SPEED_CEILING = 1000;
+
+/**
+ * 官方字段：流式速度 = 输出 token ÷ streaming_duration，
+ * 端到端速度 = 输出 token ÷ (time_to_first_token + streaming_duration)。
+ * show 为界面取值：流式速度不可信时回退端到端。
+ */
+function speedOf(output, ttftMs, streamMs) {
+  const stream = output > 0 && streamMs > 0 ? output * 1000 / streamMs : null;
+  const endToEnd = output > 0 && ttftMs + streamMs > 0 ? output * 1000 / (ttftMs + streamMs) : null;
+  const show = stream !== null && stream <= STREAM_SPEED_CEILING ? stream : endToEnd;
+  return { stream, endToEnd, show };
+}
+
 /**
  * 模型用量消息（gen_metadata f1.f4 / steps f9）实测字段：
  *   f1 模型枚举编号、f2 非缓存提示 token（新计费输入）、f3 输出 token、
@@ -128,22 +153,24 @@ function parseConversation(db) {
       try { return proto.asMessage(raw); } catch (_) { return null; }
     }).find((label) => label && proto.asString(proto.last(label, 1)) === 'cascade_id');
     if (!cascadeId || !result.conversationId || proto.asString(proto.last(cascadeId, 2)) === result.conversationId) {
-      mainGen.push({ rowid, usage, contextUsed, contextLimit, checkpointStep: f9 ? proto.last(f9, 1) : null });
+      mainGen.push({
+        rowid, usage, contextUsed, contextLimit, checkpointStep: f9 ? proto.last(f9, 1) : null,
+        // 官方记录的单次生成耗时：f11 = time_to_first_token，f12 = streaming_duration
+        ttftMs: durationMs(proto.last(gen, 11)),
+        streamMs: durationMs(proto.last(gen, 12)),
+      });
     }
     return false;
   });
 
   // 步数：type14=用户轮，type15=助手步（其余步骤类型计入步数之外的展示口径由 store 决定）
   const stepsRoot = table('steps');
-  const emptyRound = () => ({ decodeMs: 0, outputTokens: 0 });
-  const timing = result.timing = { decodeMs: 0, outputTokens: 0, llmMs: 0, toolMs: null, ttftMs: 0, ttftCount: 0 };
-  let round = emptyRound();
+  const timing = result.timing = { llmMs: 0, toolMs: null };
   let startedRound = false;
   let settledSteps = 0;
   let lastCompaction = null;
   const finishRound = () => {
     if (startedRound && settledSteps > 0) result.completedTurns++;
-    if (round.decodeMs > 0) result.latestStep = round;
   };
   const visitStep = (rowid, values) => {
     // 列：idx, step_type, status, has_subtrajectory, metadata, error_details,
@@ -153,7 +180,6 @@ function parseConversation(db) {
     if (stepType === STEP_USER) {
       result.userTurns += 1;
       finishRound();
-      round = emptyRound();
       startedRound = true;
       settledSteps = 0;
       return false;
@@ -185,27 +211,15 @@ function parseConversation(db) {
       }
       return false;
     }
-    const started = stamp(1), settled = stamp(7) ?? stamp(8), first = stamp(6);
+    const started = stamp(1), settled = stamp(7) ?? stamp(8);
     if (settled === null) return false;
     settledSteps++;
     result.agentSteps++;
     if (started === null || settled <= started) return false;
-    const hasFirst = first !== null && first >= started && first < settled;
+    // The shipped descriptor marks f6/f7 as viewable/finished, not first token
+    // (measured: f7 === completed_at in every row), so decode spans do not exist
+    // here and TTFT would be fabricated.
     timing.llmMs += settled - started;
-    if (hasFirst) {
-      timing.ttftMs += first - started;
-      timing.ttftCount++;
-    }
-    const usage = readUsage(proto.asMessage(proto.last(meta, 9)));
-    if (usage && usage.output > 0) {
-      // When no first-token stamp survives in the log, use the whole step interval.
-      const elapsed = settled - (hasFirst ? first : started);
-      timing.decodeMs += elapsed;
-      timing.outputTokens += usage.output;
-      result.latestRequestSpeed = usage.output * 1000 / elapsed;
-      round.decodeMs += elapsed;
-      round.outputTokens += usage.output;
-    }
     return false;
   };
   db.walkTable(stepsRoot, visitStep);
@@ -225,6 +239,24 @@ function parseConversation(db) {
     result.totals.freshInput += entry.usage.freshInput;
     result.totals.cachedInput += entry.usage.cachedInput;
     result.totals.output += entry.usage.output;
+  }
+
+  // 速度：取最新一次带官方耗时的生成；平均分会话内同类样本累计。
+  let latest = null;
+  let ttftSum = 0, streamSum = 0, outSum = 0, samples = 0;
+  for (const entry of mainGen) {
+    if (entry.usage.output > 0 && entry.streamMs > 0) {
+      latest = entry;
+      ttftSum += entry.ttftMs || 0;
+      streamSum += entry.streamMs;
+      outSum += entry.usage.output;
+      samples += 1;
+    }
+  }
+  if (latest) {
+    const last = speedOf(latest.usage.output, latest.ttftMs || 0, latest.streamMs);
+    result.latestSpeed = { ...last, ttftMs: latest.ttftMs, streamMs: latest.streamMs, output: latest.usage.output };
+    result.averageSpeed = { ...speedOf(outSum, ttftSum, streamSum), ttftMs: samples ? ttftSum / samples : null };
   }
   return result;
 }

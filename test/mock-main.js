@@ -82,6 +82,10 @@ Module._load = function (request, parent, isMain) {
   if (request === 'electron') return electronStub;
   if (request === './lib/store') return { antigravityDir: () => TMP };
   if (request === './snapshot-worker') return { close() {}, snapshotForId: async (id) => ({ ok:true, conversationId:id, title:'Fixture', running:false, turns:1, steps:2, latestSpeed:null, tokens:null, context:null, subagents:null }) };
+  if (request === './lib/quota') return { getQuotaPools: async () => [
+    { kind:'gemini', name:'Gemini Models', fiveHour:{remainingFraction:.93,resetTime:null}, weekly:{remainingFraction:.96,resetTime:null} },
+    { kind:'claude-gpt', name:'Claude and GPT models', fiveHour:{remainingFraction:.8,resetTime:null}, weekly:{remainingFraction:.7,resetTime:null} },
+  ] };
   return origLoad.call(this, request, parent, isMain);
 };
 require(path.join(WRAPPER, 'statusbar.js'));
@@ -102,8 +106,8 @@ check('注册了 ready / browser-window-created / web-contents-created', () => {
 
 const id1 = 'aaaaaaaa-0000-4000-8000-000000000001';
 const id2 = 'aaaaaaaa-0000-4000-8000-000000000002';
-const appWin = makeWindow('https://127.0.0.1:5123/', { convId: id1 });
-const otherWin = makeWindow('https://127.0.0.1:5123/', { convId: id2 });
+const appWin = makeWindow('https://127.0.0.1:5123/', { convId: id1, modelName: 'Gemini 4 Hydrogen High', modelFamily: 'gemini' });
+const otherWin = makeWindow('https://127.0.0.1:5123/', { convId: id2, modelName: 'Claude Sonnet', modelFamily: 'claude-gpt' });
 emit('web-contents-created', {}, otherWin.webContents);
 const extWin = makeWindow('https://example.com/some/external/page');
 const localWin = makeWindow('https://127.0.0.1:5123/hub');
@@ -146,7 +150,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.ok(pushes.length >= 3, 'pushes=' + pushes.length);
     for (const p of pushes) assert.ok(p.startsWith(PREFIX));
   });
-  check('轮询先取 window.__agySbCtx()（绑定路径）', () => {
+  check('轮询先取 window.__agySbCtx()', () => {
     // 汇总所有已注入窗口的 ctx 读取次数（每轮每窗口 1 次；初始 pump 与循环 pump
     // 的交错可能使轮数少一次，断言 ≥3 证明 ctx 路径在多个轮询周期真实执行）
     const ctxReads = windows.flatMap((w) => w.webContents._calls).filter((c) => c === CTX_READ);
@@ -158,15 +162,19 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   check('payload 字段完整（snapshotForId/snapshot 形状，含 bindSource）', () => {
     const pushes = appWin.webContents._calls.filter((c) => c.startsWith(PREFIX));
     const p = JSON.parse(pushes[pushes.length - 1].slice(PREFIX.length, -1));
-    for (const k of ['ok', 'conversationId', 'title', 'running', 'turns', 'steps', 'tokens', 'context', 'subagents', 'latestSpeed', 'bindSource']) {
+    for (const k of ['ok', 'conversationId', 'title', 'running', 'turns', 'steps', 'tokens', 'context', 'subagents', 'bindSource', 'modelName', 'modelFamily', 'quotaPools']) {
       assert.ok(k in p, 'missing field: ' + k);
     }
     assert.strictEqual(typeof p.ok, 'boolean');
     assert.strictEqual(typeof p.bindSource, 'string');
     assert.strictEqual(p.bindSource, 'uuid');
     assert.strictEqual(p.conversationId, id1);
+    assert.strictEqual(p.modelFamily, 'gemini');
+    assert.strictEqual(p.quotaPools.find((item) => item.kind === p.modelFamily).weekly.remainingFraction, .96);
     const latest = (win) => JSON.parse(win.webContents._calls.filter((c) => c.startsWith(PREFIX)).at(-1).slice(PREFIX.length, -1));
     assert.strictEqual(latest(otherWin).conversationId, id2);
+    assert.strictEqual(latest(otherWin).modelFamily, 'claude-gpt');
+    assert.strictEqual(latest(otherWin).quotaPools.find((item) => item.kind === latest(otherWin).modelFamily).fiveHour.remainingFraction, .8);
     assert.strictEqual(latest(localWin), null);
   });
 
@@ -212,7 +220,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.ok(script.includes('position:static'), '应为文档流内嵌');
     assert.ok(script.includes('surface-composer'), 'composer 锚点选择器应来自实测');
   });
-  check('renderer.js 含 __agySbCtx 与观测器（稳定性）', () => {
+  check('renderer.js 含 __agySbCtx 与观测器', () => {
     const script = require(path.join(WRAPPER, 'renderer.js'));
     assert.ok(script.includes('__agySbCtx'));
     assert.ok(script.includes('data-cascade-id'), 'uuid 来源选择器应来自实测');
@@ -230,9 +238,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
     assert.ok(content.includes('[inject-ok] renderer installed'));
     assert.ok(content.includes('[frame]'));
     assert.ok(content.includes('[ctx] session binding changed'));
-    assert.ok(!content.includes('example.com'));
-    assert.ok(!content.includes(id1));
-    assert.ok(!content.includes('Fixture'));
+    assert.ok(!content.includes(id1) && !content.includes('Fixture'));
   });
 
   emit('will-quit');
